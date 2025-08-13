@@ -18,3 +18,16 @@ chmod +x run.sh install-r-from-source.sh install-rstudio-server.sh configure-pos
 ```bash
 ./run.sh
 ```
+
+# 4) Log-in to RStudio server (http://<EC2-Public-DNS>:8787)
+
+```bash
+Username: rstudio
+Password: rstudio
+```
+
+# 5) Change the password in the RStudio terminal
+
+```bash
+sudo passwd rstudio
+```
