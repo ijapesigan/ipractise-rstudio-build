@@ -28,7 +28,8 @@ retry(){ local n=$1; shift; local i; for ((i=1;i<=n;i++)); do "$@" && return 0 |
 url_exists(){ curl -fsI "$1" >/dev/null 2>&1; }
 
 retry 3 apt-get update -y
-retry 3 apt-get install -y --no-install-recommends       gdebi-core adduser procps psmisc libssl3 libclang-dev libstdc++-12-dev ca-certificates curl wget
+retry 3 apt-get install -y --no-install-recommends \
+  gdebi-core adduser procps psmisc libssl3 libclang-dev libstdc++-12-dev ca-certificates curl wget
 
 CODENAME="${UBUNTU_CODENAME}"
 BASES=( "https://download2.rstudio.org/server" "https://download1.rstudio.org/server" )
@@ -62,11 +63,40 @@ else
   done
 fi
 
-[[ ${#CANDIDATES[@]} -gt 0 ]] || { echo "No candidate URLs produced"; exit 1; }
+# ---------- Fallback: scrape Posit's downloads page for a Jammy build ----------
+fallback_scrape() {
+  # Works for both amd64 and arm64; Noble is compatible with Jammy builds.
+  local page url
+  page="$(curl -fsSL https://posit.co/download/rstudio-server/ || true)"
+  # Grab first matching direct .deb link
+  url="$(printf '%s' "$page" \
+    | grep -Eo "https://download[0-9]\.rstudio\.org/server/(jammy|ubuntu22)/${ARCH}/rstudio-server-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-${ARCH}\.deb" \
+    | head -n1)"
+  if [[ -n "$url" ]]; then
+    echo "$url"
+    return 0
+  fi
+  return 1
+}
 
 DL_URL=""
-for u in "${CANDIDATES[@]}"; do if url_exists "${u}"; then DL_URL="${u}"; break; fi; done
-[[ -n "${DL_URL}" ]] || { echo "Could not resolve RStudio Server URL"; printf '%s\n' "${CANDIDATES[@]}" >&2; exit 1; }
+if [[ ${#CANDIDATES[@]} -gt 0 ]]; then
+  for u in "${CANDIDATES[@]}"; do
+    if url_exists "${u}"; then DL_URL="${u}"; break; fi
+  done
+fi
+
+if [[ -z "${DL_URL}" ]]; then
+  echo "Primary URL resolution failed; trying Jammy fallback from Posit downloads page…" >&2
+  if fb="$(fallback_scrape)"; then
+    DL_URL="${fb}"
+  else
+    echo "ERROR: Could not resolve an RStudio Server download URL." >&2
+    echo "Tried candidates:" >&2
+    printf '  %s\n' "${CANDIDATES[@]}" >&2
+    exit 1
+  fi
+fi
 
 echo "Downloading: ${DL_URL}"
 tmpdir=$(mktemp -d); trap 'rm -rf "${tmpdir}"' EXIT
@@ -75,11 +105,21 @@ DEB_FILE=$(basename "${DL_URL}")
 (cd "${tmpdir}" && gdebi -n "${DEB_FILE}" || dpkg -i "${DEB_FILE}" || true)
 apt-get -f install -y
 
+# Ensure a login-capable user
 if ! id -u "${DEFAULT_USER}" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "${DEFAULT_USER}"
   echo "${DEFAULT_USER}:${DEFAULT_USER}" | chpasswd
   usermod -aG sudo "${DEFAULT_USER}" || true
   echo "Created user '${DEFAULT_USER}' with password same as username. Change it."
+fi
+
+# ---------- Ubuntu 24.04 user-namespace restriction workaround ----------
+# Some 24.04 images set kernel.apparmor_restrict_unprivileged_userns=1 which can
+# prevent RStudio Server from launching sessions. Relax it and reload sysctls.
+userns_cur="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "")"
+if [[ "${userns_cur}" != "0" && -n "${userns_cur}" ]]; then
+  echo "kernel.apparmor_restrict_unprivileged_userns = 0" > /etc/sysctl.d/20-rstudio-userns.conf
+  sysctl --system || true
 fi
 
 systemctl enable rstudio-server
