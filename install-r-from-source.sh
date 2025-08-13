@@ -39,28 +39,60 @@ retry 3 apt-get install -y --no-install-recommends locales
 /usr/sbin/locale-gen --lang "${LANG}"
 /usr/sbin/update-locale --reset LANG="${LANG}"
 
-retry 3 apt-get install -y --no-install-recommends       build-essential gfortran clang make cmake ninja-build       pkg-config       libreadline-dev libbz2-dev zlib1g-dev liblzma-dev libzstd-dev       libpcre2-dev libcurl4-openssl-dev       libpng-dev libjpeg-dev libtiff5-dev       libx11-dev libxft-dev libxext-dev libxt-dev libxinerama-dev       libxml2-dev       libblas-dev liblapack-dev libopenblas-dev       libedit-dev       ca-certificates curl wget git python3 python3-pip texinfo
+retry 3 apt-get install -y --no-install-recommends \
+  build-essential gfortran clang make cmake ninja-build \
+  pkg-config \
+  libreadline-dev libbz2-dev zlib1g-dev liblzma-dev libzstd-dev \
+  libpcre2-dev libcurl4-openssl-dev \
+  libpng-dev libjpeg-dev libtiff5-dev \
+  libx11-dev libxft-dev libxext-dev libxt-dev libxinerama-dev \
+  libxml2-dev \
+  libblas-dev liblapack-dev libopenblas-dev \
+  libedit-dev \
+  ca-certificates curl wget git python3 python3-pip texinfo
 apt-get install -y --no-install-recommends default-jre || true
 
 # Prefer OpenBLAS if alternatives are registered (amd64/arm64)
-if update-alternatives --query libblas.so-x86_64-linux-gnu >/dev/null 2>&1; then
-  update-alternatives --set libblas.so-x86_64-linux-gnu /usr/lib/x86_64-linux-gnu/openblas/libblas.so || true
-  update-alternatives --set liblapack.so-x86_64-linux-gnu /usr/lib/x86_64-linux-gnu/openblas/liblapack.so || true
+if update-alternatives --list libblas.so-x86_64-linux-gnu >/dev/null 2>&1; then
+  oblas="$(update-alternatives --list libblas.so-x86_64-linux-gnu | grep -m1 openblas || true)"
+  [[ -n "${oblas}" ]] && update-alternatives --set libblas.so-x86_64-linux-gnu "${oblas}" || true
 fi
-if update-alternatives --query libblas.so-aarch64-linux-gnu >/dev/null 2>&1; then
-  update-alternatives --set libblas.so-aarch64-linux-gnu /usr/lib/aarch64-linux-gnu/openblas/libblas.so || true
-  update-alternatives --set liblapack.so-aarch64-linux-gnu /usr/lib/aarch64-linux-gnu/openblas/liblapack.so || true
+if update-alternatives --list liblapack.so-x86_64-linux-gnu >/dev/null 2>&1; then
+  olapack="$(update-alternatives --list liblapack.so-x86_64-linux-gnu | grep -m1 openblas || true)"
+  [[ -n "${olapack}" ]] && update-alternatives --set liblapack.so-x86_64-linux-gnu "${olapack}" || true
+fi
+if update-alternatives --list libblas.so-aarch64-linux-gnu >/dev/null 2>&1; then
+  oblas_a="$(update-alternatives --list libblas.so-aarch64-linux-gnu | grep -m1 openblas || true)"
+  [[ -n "${oblas_a}" ]] && update-alternatives --set libblas.so-aarch64-linux-gnu "${oblas_a}" || true
+fi
+if update-alternatives --list liblapack.so-aarch64-linux-gnu >/dev/null 2>&1; then
+  olapack_a="$(update-alternatives --list liblapack.so-aarch64-linux-gnu | grep -m1 openblas || true)"
+  [[ -n "${olapack_a}" ]] && update-alternatives --set liblapack.so-aarch64-linux-gnu "${olapack_a}" || true
 fi
 
 R_BASE_URL_RELEASE="https://cran.r-project.org/src/base/R-4"
 SNAPSHOT_BASE="https://cran.r-project.org/src/base-prerelease"
 case "${R_VERSION}" in
   latest)
-    TARBALL=$(curl -fsSL "${R_BASE_URL_RELEASE}/" |           awk -F'[<>]' '/R-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz/ {print $3}' | sort -V | tail -n1)
-    URL="${R_BASE_URL_RELEASE}/${TARBALL}";;
-  patched) URL="${SNAPSHOT_BASE}/R-patched.tar.gz"; TARBALL="R-patched.tar.gz";;
-  devel)   URL="${SNAPSHOT_BASE}/R-devel.tar.gz";   TARBALL="R-devel.tar.gz";;
-  *)       TARBALL="R-${R_VERSION}.tar.gz"; URL="${R_BASE_URL_RELEASE}/${TARBALL}";;
+    # Robustly detect the newest R-x.y.z tarball from CRAN index
+    TARBALL="$(curl -fsSL "${R_BASE_URL_RELEASE}/" \
+      | grep -Eo 'R-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' \
+      | sort -Vu | tail -1)"
+    if [[ -z "${TARBALL}" ]]; then
+      echo "ERROR: Could not detect latest R tarball from ${R_BASE_URL_RELEASE}" >&2
+      exit 1
+    fi
+    URL="${R_BASE_URL_RELEASE}/${TARBALL}"
+    ;;
+  patched)
+    URL="${SNAPSHOT_BASE}/R-patched.tar.gz"; TARBALL="R-patched.tar.gz"
+    ;;
+  devel)
+    URL="${SNAPSHOT_BASE}/R-devel.tar.gz";   TARBALL="R-devel.tar.gz"
+    ;;
+  *)
+    TARBALL="R-${R_VERSION}.tar.gz"; URL="${R_BASE_URL_RELEASE}/${TARBALL}"
+    ;;
 esac
 
 echo "Downloading: ${URL}"
@@ -72,7 +104,17 @@ SRCDIR=$(find "${tmpdir}" -maxdepth 1 -type d -name "R-*" -print -quit)
 [[ "${MAKE_NJOBS}" == "0" ]] && MAKE_NJOBS="$(nproc_auto)"
 
 cd "${SRCDIR}"
-./configure       --prefix="${R_PREFIX}"       --enable-R-shlib       --with-blas       --with-lapack       --with-readline       --with-recommended-packages       FFLAGS="-O3 -pipe -fPIC"       CFLAGS="-O3 -pipe -fPIC"       CXXFLAGS="-O3 -pipe -fPIC"       FCFLAGS="-O3 -pipe -fPIC"
+./configure \
+  --prefix="${R_PREFIX}" \
+  --enable-R-shlib \
+  --with-blas \
+  --with-lapack \
+  --with-readline \
+  --with-recommended-packages \
+  FFLAGS="-O3 -pipe -fPIC" \
+  CFLAGS="-O3 -pipe -fPIC" \
+  CXXFLAGS="-O3 -pipe -fPIC" \
+  FCFLAGS="-O3 -pipe -fPIC"
 make -j"${MAKE_NJOBS}"
 make install
 
